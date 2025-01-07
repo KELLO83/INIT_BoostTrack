@@ -6,10 +6,10 @@ from __future__ import print_function
 import os
 from copy import deepcopy
 from typing import Optional, List
-
-import cv2
+import logging
 import numpy as np
 
+import cv2
 from default_settings import GeneralSettings, BoostTrackSettings, BoostTrackPlusPlusSettings
 from tracker.embedding import EmbeddingComputer
 from tracker.assoc import associate, iou_batch, MhDist_similarity, shape_similarity, soft_biou_batch
@@ -155,6 +155,18 @@ class BoostTrack(object):
             self.ecc = ECC(scale=350, video_name=video_name, use_cache=True)
         else:
             self.ecc = None
+            
+            
+        self.reid_model = GeneralSettings['reid_model']
+
+        # Initialize logging
+        self.logger = logging.getLogger('BoostTrack')
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.DEBUG)
 
     def update(self, dets, img_tensor, img_numpy, tag):
         """
@@ -220,7 +232,54 @@ class BoostTrack(object):
             lambda_mhd=self.lambda_mhd,
             lambda_shape=self.lambda_shape
         )
+        
+        
+        # 디버깅: 매칭 정보 출력
+        print(f"\n{'='*50}")
+        print(f"프레임 {self.frame_count}")
+        print(f"현재 트래커 ID: {[t.id for t in self.trackers]}")
 
+        if len(matched) > 0:
+            print("\n[매칭된 정보]")
+            print(f"검출-트래커 쌍: {matched}")
+            print(f"매칭된 트래커 ID: {[self.trackers[m[1]].id for m in matched]}")
+
+        if len(unmatched_dets) > 0:
+            print(f"\n[매칭되지 않은 검출]: {unmatched_dets}")
+
+        if len(unmatched_trks) > 0:
+            print("\n[매칭되지 않은 트래커]")
+            print(f"인덱스: {unmatched_trks}")
+            print(f"트래커 ID: {[self.trackers[t].id for t in unmatched_trks]}")
+
+        if emb_cost is not None and len(emb_cost) > 0:
+            print("\n=== 상세 매칭 정보 ===")
+            
+            # 행렬 출력을 위한 helper function
+            def format_matrix(matrix, name):
+                print(f"\n[{name}]")
+                with np.printoptions(precision=4, suppress=True):
+                    print(matrix)
+            
+            # 각 행렬 출력
+            format_matrix(emb_cost, "임베딩 유사도 행렬")
+            if len(trks) > 0:
+                format_matrix(iou_batch(dets, trks[:, :4]), "IOU 행렬")
+                format_matrix(self.get_mh_dist_matrix(dets), "마할라노비스 거리 행렬")
+            
+            # 최종 매칭 결과 출력
+            print("\n[최종 매칭 결과]")
+            for m in matched:
+                det_idx, trk_idx = m
+                print(
+                    f"검출 {det_idx} -> 트래커 {self.trackers[trk_idx].id + 1 } ("
+                    f"임베딩: {emb_cost[det_idx][trk_idx]:.4f}, "
+                    f"IOU: {iou_batch(dets, trks[:, :4])[det_idx][trk_idx]:.4f}, "
+                    f"마할라노비스: {self.get_mh_dist_matrix(dets)[det_idx][trk_idx]:.4f})"
+                )
+
+        print(f"\n{'='*50}")
+        
         trust = (dets[:, 4] - self.det_thresh) / (1 - self.det_thresh)
         af = 0.95
         dets_alpha = af + (1 - af) * (1 - trust)
@@ -233,17 +292,26 @@ class BoostTrack(object):
             if dets[i, 4] >= self.det_thresh:
                 self.trackers.append(KalmanBoxTracker(dets[i, :], emb=dets_embs[i]))
 
+        # 전체 트래커 ID 목록 (잠재적인 것 포함)
+        all_trackers = [trk.id + 1 for trk in self.trackers]
+        print(f"전체 트래커 ID (잠재적인 것 포함): {all_trackers}")
+
         ret = []
         i = len(self.trackers)
         for trk in reversed(self.trackers):
             d = trk.get_state()[0]
-            if (trk.time_since_update < 1) and (trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits):
+            # 매칭되지 않은 트래커도 일정 기간 동안은 결과에 포함
+            if (trk.time_since_update < 5) and (trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits):
                 # +1 as MOT benchmark requires positive
                 ret.append(np.concatenate((d, [trk.id + 1], [trk.get_confidence()])).reshape(1, -1))
             i -= 1
             # remove dead tracklet
             if trk.time_since_update > self.max_age:
                 self.trackers.pop(i)
+
+        # 시각화되는 트래커 ID 목록
+        active_trackers = [int(r[0][4]) for r in ret] if len(ret) > 0 else []
+        print(f"시각화되는 트래커 ID: {active_trackers}")
 
         if len(ret) > 0:
             return np.concatenate(ret)

@@ -17,6 +17,7 @@ from tracker.boost_track import BoostTrack
 import torch
 import numpy as np
 import random
+from ultralytics import YOLO
 """
 Script modified from Deep OC-SORT: 
 https://github.com/GerardMaggiolino/Deep-OC-SORT
@@ -32,11 +33,27 @@ def get_id_color(track_id):
     color = id_colors[track_id]
     return color
 
+def process_yolo_detection(results):
+    "new id 사용"
+    dets = []
+    for result in results:
+        boxes = result.boxes
+        for i in range(len(boxes)):
+            x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy()
+            conf = boxes.conf[i].cpu().numpy()
+            cls = boxes.cls[i].cpu().numpy()
+        
+            if cls == 0:
+                dets.append([x1, y1, x2, y2, conf])
+                
+    return np.array(dets) if dets else None
+
 
 def get_main_args():
     parser = make_parser()
-    parser.add_argument("--data", type=str, default="data/cam0", help="Path to your custom dataset")  
-
+    parser.add_argument("--data", type=str, default="data/cam0", help="Path your dataset")  
+    parser.add_argument('--reid_model', type=str, default='external/weights/mot17_sbs_R101-ibn.pth', help='Path to the reid model')
+    
     parser.add_argument("--no_reid", action="store_true", help="mark if visual embedding should NOT be used" , default=False)
     parser.add_argument("--no_cmc", action="store_true", help="mark if camera motion compensation should NOT be used" , default=False)
     parser.add_argument("--s_sim_corr", action="store_true", help="mark if you want to use corrected version of shape similarity calculation function")
@@ -44,7 +61,8 @@ def get_main_args():
     parser.add_argument("--btpp_arg_iou_boost", action="store_true", help="BoostTrack++ arg. Mark if only IoU should be used for detection confidence boost." , default=True)
     parser.add_argument("--btpp_arg_no_sb", action="store_true", help="BoostTrack++ arg. Mark if soft detection confidence boost should NOT be used."  , default= False )
     parser.add_argument("--btpp_arg_no_vt", action="store_true", help="BoostTrack++ arg. Mark if varying threhold should NOT be used for the detection confidence boost." , default=False)
-    parser.add_argument('--video' , default = True)
+    parser.add_argument('--video' , default = False)
+
 
     args = parser.parse_args()
         
@@ -61,6 +79,7 @@ def main():
     GeneralSettings.values['use_embedding'] = True
     GeneralSettings.values['use_ecc'] = True
     GeneralSettings.values['test_dataset'] = True
+    GeneralSettings.values['reid_model'] = args.reid_model
 
     BoostTrackSettings.values['s_sim_corr'] = False
 
@@ -69,91 +88,30 @@ def main():
     BoostTrackPlusPlusSettings.values['use_vt'] = True
 
 
-    detection_model = detector.Detector('external/weights/bytetrack_x_mot20.tar')  
+    #detection_model = detector.Detector('external/weights/bytetrack_x_mot20.tar')  
+    detection_model = detector.Detector('external/weights/bytetrack_x_mot17.pth .tar')
 
-    size = (640, 640)                                               
-    # 모델 구조 상세 출력
-    print("\n=== Model Structure ===")
+    print("\n=== YOLOX Network  loading ... ===")
     if detection_model.model is not None:
-        print("\n2. Model Architecture:")
-        if hasattr(detection_model.model, 'model'):
-            print(detection_model.model.model)
-        else:
-            print(detection_model.model)
-        print("\n3. Model Parameters:")
         total_params = sum(p.numel() for p in detection_model.model.parameters())
         print(f"Total parameters: {total_params:,}")
     else:
-        print("Error: Model not initialized properly")
-
-
-    
-    loader = dataset.get_mot_loader(args.data, size=size)
-    test = iter(loader)
-    first_batch = next(test)
-    
-    # 데이터 구조 확인
-    (img, np_img), label, info, idx = first_batch
-    print("이미지 텐서 크기:", img.shape)
-    print("NumPy 이미지 크기:", np_img.shape)
-    print("라벨:", label)
-    print("정보:", info)
-    print("인덱스:", idx)
-
-    # Test detection on first image
-    print("\n=== Testing Object Detection ===")
-    loader = dataset.get_mot_loader(args.data, size=size)
-    
-    loader_iter = iter(loader)
-    frame_id = 0
-
-    # for batch in loader_iter:
-    #     (img, np_img), label, info, idx = batch
+        print("Error: Model not initialized")
         
-    #     display_img = np_img[0].numpy()
-        
-    #     if display_img.max() > 1.0:
-    #         display_img = display_img.astype(np.uint8)
-    #     else:
-    #         display_img = (display_img * 255).astype(np.uint8)
-        
-    #     output = detection_model.forward(img.cuda())
-    #     if output is not None:
-    #         numpy_value = output.cpu().numpy()
 
-    #         for det in numpy_value:
-    #             x1, y1, x2, y2, score = det
-                
-    #             x1 = max(0, x1)
-    #             y1 = max(0, y1)
-                
-    #             cv2.rectangle(display_img, 
-    #                         (int(x1), int(y1)), 
-    #                         (int(x2), int(y2)), 
-    #                         (0, 255, 0), 2)
-                
-    #             score_text = f'{score:.2f}'
-    #             cv2.putText(display_img, 
-    #                     score_text, 
-    #                     (int(x1), int(y1-10)), 
-    #                     cv2.FONT_HERSHEY_SIMPLEX, 
-    #                     0.9, (0, 0, 255), 2)
 
-    #         cv2.namedWindow('Detections', cv2.WINDOW_NORMAL)
-    #         cv2.imshow('Detections', display_img)
-    #         cv2.waitKey(0)
-
-            
+    size = (640, 640)    
+    loader = dataset.dataLoader(args.data, size=size) # args.data = 데이타 경로
+    frame_id = 0       
     frame_count = 0
     total_time = 0
-    frame_id = 0
     video_name = args.data
     tracker = None
-    results = {video_name: []}
+    
+    #visualize_detections(loader , detection_model)
 
-    loader_iter = iter(loader)
-    for batch in loader_iter:
-        (img, np_img), label, info, idx = batch
+    for batch in loader:
+        (img, np_img), _ , _ , _ = batch
         frame_id += 1
         
         tag = f"{video_name}:{frame_id}"
@@ -175,21 +133,27 @@ def main():
 
             tracker = BoostTrack(video_name=video_name)
 
-            # Initialize video writer
             if args.video:
-                output_path = f"{video_name}_tracking.mp4"  # 현재 디렉토리에 저장
+                string = args.reid_model.split('/')[-1].split('.')[0]
+                print("string: ", string)
+                output_path = f"{string}_out.mp4" 
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 first_frame = cv2.imread(os.path.join(args.data, natsorted(os.listdir(args.data))[0]))
                 frame_size = (first_frame.shape[1], first_frame.shape[0])
                 out = cv2.VideoWriter(output_path, fourcc, 15.0, frame_size)
                 print(f"\nVideo will be saved to: {os.path.abspath(output_path)}")
 
+
+    
+        
         output = detection_model.forward(img.cuda())
         if output is None:
             continue
         
+        output = output.cpu().numpy()
+        
 
-        dets = output.cpu().numpy()
+        dets = output.copy()
         
         start_time = time.time()
 
@@ -202,13 +166,14 @@ def main():
         detection_img = cv2.cvtColor(detection_img, cv2.COLOR_BGR2RGB)
         tracking_img = cv2.cvtColor(tracking_img, cv2.COLOR_BGR2RGB)
 
-        for det in dets:
+        for idx , det in enumerate(dets):
             x1, y1, x2, y2, score = det
             x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-            cv2.rectangle(detection_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(detection_img, f'Det:{score:.2f}', (x1, y1-10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
+            
+            color = get_id_color(idx)
+            cv2.rectangle(detection_img, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(detection_img, f'ID:{idx}', (x1, y1-30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         for tlwh, track_id, conf in zip(tlwhs, ids, confs):
             color = get_id_color(track_id)
@@ -220,11 +185,11 @@ def main():
             cv2.putText(tracking_img, f'ID:{track_id}', (x1, y1-30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
         
-        # cv2.namedWindow('Detection', cv2.WINDOW_NORMAL)
-        # cv2.namedWindow('Tracking', cv2.WINDOW_NORMAL)
-        # cv2.imshow('Detection', detection_img)
-        # cv2.imshow('Tracking', tracking_img)
-        # cv2.waitKey(0)
+        cv2.namedWindow('Detection', cv2.WINDOW_NORMAL)
+        cv2.namedWindow('Tracking', cv2.WINDOW_NORMAL)
+        cv2.imshow('Detection', detection_img)
+        cv2.imshow('Tracking', tracking_img)
+        cv2.waitKey(0)
 
         if args.video:
             out.write(tracking_img)
@@ -232,17 +197,56 @@ def main():
   
         total_time += time.time() - start_time
         frame_count += 1
-        
-        
-
-        results[video_name].append((frame_id, tlwhs, ids, confs))
-        
+            
     print(f"Time spent: {total_time:.3f}, FPS {frame_count / (total_time + 1e-9):.2f}")
     print(total_time)
 
     if args.video:
         out.release()
-    cv2.destroyAllWindows()
+
+def visualize_detections(loader, detection_model):
+    """
+    mot17 mot 20 yolo 디버깅 확인용도
+    """
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter('yolox_vision.mp4', fourcc, 15.0, (640, 640)) 
+    
+    for batch in loader:
+        (img, np_img), _ , _ , _ = batch
+        display_img = np_img[0].numpy()
+        
+        if display_img.max() > 1.0:
+            display_img = display_img.astype(np.uint8)
+        else:
+            display_img = (display_img * 255).astype(np.uint8)
+        
+        display_img = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
+        
+        output = detection_model.forward(img.cuda())
+        if output is not None:
+            numpy_value = output.cpu().numpy()
+
+            for det in numpy_value:
+                x1, y1, x2, y2, score = det
+                
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                
+                cv2.rectangle(display_img, 
+                            (int(x1), int(y1)), 
+                            (int(x2), int(y2)), 
+                            (0, 255, 0), 2)
+                
+                score_text = f'{score:.2f}'
+                cv2.putText(display_img, 
+                            score_text, 
+                            (int(x1), int(y1-10)), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 
+                            0.9, (0, 0, 255), 2)
+    
+        out.write(display_img)
+    
+    out.release()
 
 if __name__ == "__main__":
     main()

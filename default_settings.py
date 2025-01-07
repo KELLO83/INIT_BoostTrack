@@ -19,7 +19,8 @@ class GeneralSettings:
         'dataset': 'mot17',
         'test_dataset': False,
         'min_box_area': 10,
-        'aspect_ratio_thresh': 1.6
+        'aspect_ratio_thresh': 1.6,
+        'reid_model': None
     }
 
     dataset_specific_settings: Dict[str, Dict[str, Union[float, bool, int]]] = {
@@ -60,7 +61,19 @@ class GeneralSettings:
             return GeneralSettings.values[key]
 
 
+    @classmethod
+    def validate_values(cls):
+        if cls.values["reid_model"] is None:
+            raise ValueError("reid_model이 None입니다. 사용 전에 값을 세팅하거나, 모델 경로를 지정해 주세요.")
+    
+    @classmethod
+    def get_reid_model(cls):
+        cls.validate_values()
+        return cls.values['reid_model']
+
 class BoostTrackSettings:
+    
+    
     values: Dict[str, Union[float, bool, int, str]] = {
         'lambda_iou': 0.5,  # 0 to turn off
         'lambda_mhd': 0.25,  # 0 to turn off

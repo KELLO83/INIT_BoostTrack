@@ -9,7 +9,7 @@ from external.YOLOX.yolox.data import ValTransform
 import glob
 from natsort import natsorted
 
-def get_mot_loader(data_dir, workers=4, size=(640,640)):
+def dataLoader(data_dir, workers=4, size=(640,640)):
 
         data_root = os.path.join(data_dir)
         
@@ -27,20 +27,16 @@ def get_mot_loader(data_dir, workers=4, size=(640,640)):
                 img = cv2.imread(img_path)
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 
-                # Original image for visualization
                 np_img = img.copy()
                 
-                # Resize if needed
                 if self.size != (img.shape[0], img.shape[1]):
                     img = cv2.resize(img, (self.size[1], self.size[0]))
-                    np_img = cv2.resize(np_img, (self.size[1], self.size[0]))
+                    np_img = cv2.resize(np_img, (self.size[1], self.size[0]), interpolation=cv2.INTER_AREA)
                 
-                # Convert to float and normalize
                 img = img.astype(np.float32) / 255.0
                 img = torch.from_numpy(img).permute(2, 0, 1)
-                
-                # Create empty label and info (no annotations)
-                label = torch.zeros((0, 6))  # empty label tensor
+
+                label = torch.zeros((0, 6)) 
                 info = {
                     'file_name': os.path.basename(img_path),
                     'id': idx,
@@ -51,7 +47,6 @@ def get_mot_loader(data_dir, workers=4, size=(640,640)):
                     'file_path': os.path.join('cam0', 'img1', os.path.basename(img_path))  # MOT 형식의 경로
                 }
                 
-                # Convert info to list format as expected by main.py
                 info_list = [
                     info['id'],           # idx 0: image id
                     info['video_id'],     # idx 1: video id

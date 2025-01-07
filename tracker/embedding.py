@@ -8,7 +8,7 @@ import cv2
 import torchvision
 import torchreid
 import numpy as np
-
+from default_settings import GeneralSettings
 from external.adaptors.fastreid_adaptor import FastReID
 
 """
@@ -163,25 +163,27 @@ class EmbeddingComputer:
         return embs
 
     def initialize_model(self):
-        if self.dataset == "mot17":
-            if self.test_dataset:
-                path = "external/weights/mot17_sbs_S50.pth"
-            else:
-                return self._get_general_model()
-        elif self.dataset == "mot20":
-            if self.test_dataset:
-                path = "external/weights/mot20_sbs_S50.pth"
-            else:
-                return self._get_general_model()
-        elif self.dataset == "dance":
-            path = "external/weights/dance_sbs_S50.pth"
+        # if self.dataset == "mot17":
+        #     if self.test_dataset:
+        #         path = "external/weights/mot17_sbs_S50.pth"
+        #     else:
+        #         return self._get_general_model()
+        # elif self.dataset == "mot20":
+        #     if self.test_dataset:
+        #         path = "external/weights/mot20_sbs_S50.pth"
+        #     else:
+        #         return self._get_general_model()
+        # elif self.dataset == "dance":
+        #     path = "external/weights/dance_sbs_S50.pth"
             
-        elif self.dataset == 'custom':
-            path = 'external/weights/mot17_sbs_S50.pth'
+        # elif self.dataset == 'custom':
+        #     path = 'external/weights/mot17_sbs_S50.pth'
             
-        else:
-            raise RuntimeError("Need the path for a new ReID model.")
-
+        # else:
+        #     raise RuntimeError("Need the path for a new ReID model.")
+        
+        path = GeneralSettings.get_reid_model()
+        print("Embedding model path: ", path)
         model = FastReID(path)
         model.eval()
         model.cuda()
