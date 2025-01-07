@@ -184,12 +184,15 @@ def main():
             cv2.rectangle(tracking_img, (x1, y1), (x2, y2), color, 2)
             cv2.putText(tracking_img, f'ID:{track_id}', (x1, y1-30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            
+        q_count = int(tag.split(':')[-1]) + 1
         
-        cv2.namedWindow('Detection', cv2.WINDOW_NORMAL)
-        cv2.namedWindow('Tracking', cv2.WINDOW_NORMAL)
-        cv2.imshow('Detection', detection_img)
-        cv2.imshow('Tracking', tracking_img)
-        cv2.waitKey(0)
+        if q_count >= 10:
+            cv2.namedWindow('Detection', cv2.WINDOW_NORMAL)
+            cv2.namedWindow('Tracking', cv2.WINDOW_NORMAL)
+            cv2.imshow('Detection', detection_img)
+            cv2.imshow('Tracking', tracking_img)
+            cv2.waitKey(0)
 
         if args.video:
             out.write(tracking_img)
