@@ -22,7 +22,7 @@ class EmbeddingComputer:
         self.model = None
         self.dataset = dataset
         self.test_dataset = test_dataset
-        self.crop_size = (128, 384)
+        self.crop_size = (640, 640)
         os.makedirs("./cache/embeddings/", exist_ok=True)
         self.cache_path = "./cache/embeddings/{}_embedding.pkl"
         self.cache = {}
@@ -163,24 +163,6 @@ class EmbeddingComputer:
         return embs
 
     def initialize_model(self):
-        # if self.dataset == "mot17":
-        #     if self.test_dataset:
-        #         path = "external/weights/mot17_sbs_S50.pth"
-        #     else:
-        #         return self._get_general_model()
-        # elif self.dataset == "mot20":
-        #     if self.test_dataset:
-        #         path = "external/weights/mot20_sbs_S50.pth"
-        #     else:
-        #         return self._get_general_model()
-        # elif self.dataset == "dance":
-        #     path = "external/weights/dance_sbs_S50.pth"
-            
-        # elif self.dataset == 'custom':
-        #     path = 'external/weights/mot17_sbs_S50.pth'
-            
-        # else:
-        #     raise RuntimeError("Need the path for a new ReID model.")
         
         path = GeneralSettings.get_reid_model()
         print("Embedding model path: ", path)
@@ -208,10 +190,6 @@ class EmbeddingComputer:
         model.eval()
         model.cuda()
         self.model = model
-        self.crop_size = (128, 256)
+        self.crop_size = (640, 640)
         self.normalize = True
 
-    def dump_cache(self):
-        if self.cache_name:
-            with open(self.cache_path.format(self.cache_name), "wb") as fp:
-                pickle.dump(self.cache, fp)

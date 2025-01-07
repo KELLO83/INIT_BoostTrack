@@ -52,7 +52,7 @@ def process_yolo_detection(results):
 def get_main_args():
     parser = make_parser()
     parser.add_argument("--data", type=str, default="data/cam0", help="Path your dataset")  
-    parser.add_argument('--reid_model', type=str, default='external/weights/mot17_sbs_R101-ibn.pth', help='Path to the reid model')
+    parser.add_argument('--reid_model', type=str, default='external/weights/mot17_sbs_S50.pth', help='Path to the reid model')
     
     parser.add_argument("--no_reid", action="store_true", help="mark if visual embedding should NOT be used" , default=False)
     parser.add_argument("--no_cmc", action="store_true", help="mark if camera motion compensation should NOT be used" , default=False)
@@ -172,7 +172,7 @@ def main():
             
             color = get_id_color(idx)
             cv2.rectangle(detection_img, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(detection_img, f'ID:{idx}', (x1, y1-30), 
+            cv2.putText(detection_img, f'ID:{ idx }', (x1, y1-30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         for tlwh, track_id, conf in zip(tlwhs, ids, confs):

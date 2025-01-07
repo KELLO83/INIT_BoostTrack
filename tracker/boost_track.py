@@ -55,23 +55,41 @@ class KalmanBoxTracker(object):
     """
 
     count = 0
+    active_ids = set()  # 현재 활성화된 ID들을 추적
+
+    @classmethod
+    def reset_count(cls):
+        """Reset the tracker counter and active IDs."""
+        cls.count = 0
+        cls.active_ids.clear()
+
+    @classmethod
+    def get_next_id(cls):
+        """Get next available ID."""
+        while cls.count in cls.active_ids:
+            cls.count += 1
+        cls.active_ids.add(cls.count)
+        return cls.count
 
     def __init__(self, bbox, emb: Optional[np.ndarray] = None):
         """
         Initialises a tracker using initial bounding box.
         """
-
         self.bbox_to_z_func = convert_bbox_to_z
         self.x_to_bbox_func = convert_x_to_bbox
 
         self.time_since_update = 0
-        self.id = KalmanBoxTracker.count
-        KalmanBoxTracker.count += 1
+        self.id = self.get_next_id()
+        print(f"Created new tracker with ID: {self.id}")  # Debug output
 
         self.kf = KalmanFilter(self.bbox_to_z_func(bbox))
         self.emb = emb
         self.hit_streak = 0
         self.age = 0
+
+    def __del__(self):
+        """Cleanup when tracker is deleted."""
+        KalmanBoxTracker.active_ids.discard(self.id)
 
     def get_confidence(self, coef: float = 0.9) -> float:
         n = 7
@@ -117,7 +135,10 @@ class KalmanBoxTracker(object):
         return self.x_to_bbox_func(self.kf.x)
 
     def update_emb(self, emb, alpha=0.9):
-        self.emb = alpha * self.emb + (1 - alpha) * emb
+        if self.emb is None:
+            self.emb = emb
+        else:
+            self.emb = alpha * self.emb + (1 - alpha) * emb
         self.emb /= np.linalg.norm(self.emb)
 
     def get_emb(self):
@@ -125,15 +146,22 @@ class KalmanBoxTracker(object):
 
 
 class BoostTrack(object):
-    def __init__(self, video_name: Optional[str] = None):
-
+    def __init__(self, video_name: Optional[str] = None, max_age=30, min_hits=3, iou_threshold=0.3):
+        """
+        Initialize a tracker.
+        """
+        self.max_age = max_age
+        self.min_hits = min_hits
+        self.iou_threshold = iou_threshold
+        self.trackers = []
+        self.inactive_trackers = []  # 비활성 트래커를 별도로 관리
         self.frame_count = 0
-        self.trackers: List[KalmanBoxTracker] = []
+        KalmanBoxTracker.reset_count()
 
-        self.max_age = 50
-        self.iou_threshold = GeneralSettings['iou_threshold']
+        # Reset tracker counter when initializing new BoostTrack instance
+        KalmanBoxTracker.reset_count()
+
         self.det_thresh = GeneralSettings['det_thresh']
-        self.min_hits = GeneralSettings['min_hits']
 
         self.lambda_iou = BoostTrackSettings['lambda_iou']
         self.lambda_mhd = BoostTrackSettings['lambda_mhd']
@@ -169,63 +197,73 @@ class BoostTrack(object):
             self.logger.setLevel(logging.DEBUG)
 
     def update(self, dets, img_tensor, img_numpy, tag):
-        """
-        Params:
-          dets - a numpy array of detections in the format [[x1,y1,x2,y2,score],[x1,y1,x2,y2,score],...]
-        Requires: this method must be called once for each frame even with empty detections (use np.empty((0, 5)) for frames without detections).
-        Returns the a similar array, where the last column is the object ID.
-        NOTE: The number of objects returned may differ from the number of detections provided.
-        """
-        if dets is None:
-            return np.empty((0, 5))
-        if not isinstance(dets, np.ndarray):
-            dets = dets.cpu().detach().numpy()
-
         self.frame_count += 1
-
-        # Rescale
-        scale = min(img_tensor.shape[2] / img_numpy.shape[0], img_tensor.shape[3] / img_numpy.shape[1])
-        dets = deepcopy(dets)
-        dets[:, :4] /= scale
-
-        # get predicted locations from existing trackers.
+        
+        # 현재 활성화된 트래커들의 예측 위치 계산
         trks = np.zeros((len(self.trackers), 5))
-        confs = np.zeros((len(self.trackers), 1))
-
-        for t in range(len(trks)):
-            pos = self.trackers[t].predict()[0]
-            confs[t] = self.trackers[t].get_confidence()
-            trks[t] = [pos[0], pos[1], pos[2], pos[3], confs[t, 0]]
-
+        to_del = []
+        ret = []
+        for t, trk in enumerate(self.trackers):
+            pos = trk.predict()[0]
+            trks[t] = [pos[0], pos[1], pos[2], pos[3], 0]
+            if np.any(np.isnan(pos)):
+                to_del.append(t)
+        trks = np.ma.compress_rows(np.ma.masked_invalid(trks))
+        
+        # 비활성 트래커 관리
+        current_inactive = []
+        for trk in self.trackers:
+            if trk.time_since_update > 1 and trk.time_since_update <= self.max_age * 2:
+                if trk not in self.inactive_trackers:  # 중복 방지
+                    current_inactive.append(trk)
+        self.inactive_trackers = current_inactive
+        
+        # 모든 트래커 목록 생성 (활성 + 비활성)
+        all_trackers = self.trackers + self.inactive_trackers
+        all_trks = np.zeros((len(all_trackers), 5))
+        for t, trk in enumerate(all_trackers):
+            pos = trk.get_state()[0]
+            all_trks[t] = [pos[0], pos[1], pos[2], pos[3], 0]
+            
+        print(f"\n현재 트래커 ID: {[t.id for t in self.trackers]}")
+        print(f"비활성 트래커 ID: {[t.id for t in self.inactive_trackers]}")
+        
         if self.use_dlo_boost:
             dets = self.dlo_confidence_boost(dets, self.use_rich_s, self.use_sb, self.use_vt)
-
+        
         if self.use_duo_boost:
             dets = self.duo_confidence_boost(dets)
-
+        
         remain_inds = dets[:, 4] >= self.det_thresh
         dets = dets[remain_inds]
         scores = dets[:, 4]
-
-        # Generate embeddings
+        
+        # Generate embeddings for all trackers
         dets_embs = np.ones((dets.shape[0], 1))
         emb_cost = None
         if self.embedder and dets.size > 0:
             dets_embs = self.embedder.compute_embedding(img_numpy, dets[:, :4], tag)
-            trk_embs = []
-            for t in range(len(self.trackers)):
-                trk_embs.append(self.trackers[t].get_emb())
-            trk_embs = np.array(trk_embs)
-            if trk_embs.size > 0 and dets.size > 0:
-                emb_cost = dets_embs.reshape(dets_embs.shape[0], -1) @ trk_embs.reshape((trk_embs.shape[0], -1)).T
-        emb_cost = None if self.embedder is None else emb_cost
-
-        matched, unmatched_dets, unmatched_trks, sym_matrix = associate(
+            all_trk_embs = []
+            for t in range(len(all_trackers)):
+                all_trk_embs.append(all_trackers[t].get_emb())
+            all_trk_embs = np.array(all_trk_embs)
+            if all_trk_embs.size > 0 and dets.size > 0:
+                emb_cost = dets_embs.reshape(dets_embs.shape[0], -1) @ all_trk_embs.reshape((all_trk_embs.shape[0], -1)).T
+        
+        # Calculate confidence for all trackers
+        all_confs = np.array([t.get_confidence() for t in all_trackers])
+        
+        # Get matching matrices for all trackers
+        iou_matrix = iou_batch(dets, all_trks[:, :4])
+        mh_matrix = self.get_mh_dist_matrix(dets, all_trackers)
+        
+        # Perform matching with all trackers
+        matched, unmatched_dets, unmatched_trks, cost_matrix = associate(
             dets,
-            trks,
+            all_trks,
             self.iou_threshold,
-            mahalanobis_distance=self.get_mh_dist_matrix(dets),
-            track_confidence=confs,
+            mahalanobis_distance=mh_matrix,
+            track_confidence=all_confs,
             detection_confidence=scores,
             emb_cost=emb_cost,
             lambda_iou=self.lambda_iou,
@@ -233,89 +271,78 @@ class BoostTrack(object):
             lambda_shape=self.lambda_shape
         )
         
-        
-        # 디버깅: 매칭 정보 출력
+        # Debug output
         print(f"\n{'='*50}")
         print(f"프레임 {self.frame_count}")
         print(f"현재 트래커 ID: {[t.id for t in self.trackers]}")
-
+        print(f"비활성 트래커 ID: {[t.id for t in self.inactive_trackers]}\n")
+        
         if len(matched) > 0:
-            print("\n[매칭된 정보]")
+            print("[매칭된 정보]")
             print(f"검출-트래커 쌍: {matched}")
-            print(f"매칭된 트래커 ID: {[self.trackers[m[1]].id for m in matched]}")
-
+            print(f"매칭된 트래커 ID: {[all_trackers[t].id for t in matched[:, 1]]}\n")
+        
         if len(unmatched_dets) > 0:
-            print(f"\n[매칭되지 않은 검출]: {unmatched_dets}")
-
+            print(f"[매칭되지 않은 검출]: {unmatched_dets}\n")
+        
         if len(unmatched_trks) > 0:
-            print("\n[매칭되지 않은 트래커]")
+            print("[매칭되지 않은 트래커]")
             print(f"인덱스: {unmatched_trks}")
-            print(f"트래커 ID: {[self.trackers[t].id for t in unmatched_trks]}")
-
-        if emb_cost is not None and len(emb_cost) > 0:
-            print("\n=== 상세 매칭 정보 ===")
-            
-            # 행렬 출력을 위한 helper function
-            def format_matrix(matrix, name):
-                print(f"\n[{name}]")
-                with np.printoptions(precision=4, suppress=True):
-                    print(matrix)
-            
-            # 각 행렬 출력
-            format_matrix(emb_cost, "임베딩 유사도 행렬")
-            if len(trks) > 0:
-                format_matrix(iou_batch(dets, trks[:, :4]), "IOU 행렬")
-                format_matrix(self.get_mh_dist_matrix(dets), "마할라노비스 거리 행렬")
-            
-            # 최종 매칭 결과 출력
-            print("\n[최종 매칭 결과]")
-            for m in matched:
-                det_idx, trk_idx = m
-                print(
-                    f"검출 {det_idx} -> 트래커 {self.trackers[trk_idx].id + 1 } ("
-                    f"임베딩: {emb_cost[det_idx][trk_idx]:.4f}, "
-                    f"IOU: {iou_batch(dets, trks[:, :4])[det_idx][trk_idx]:.4f}, "
-                    f"마할라노비스: {self.get_mh_dist_matrix(dets)[det_idx][trk_idx]:.4f})"
-                )
-
+            print(f"트래커 ID: {[all_trackers[t].id for t in unmatched_trks]}\n")
+        
+        print("=== 상세 매칭 정보 ===\n")
+        print("[임베딩 유사도 행렬]")
+        print(emb_cost if emb_cost is not None else "임베딩 정보 없음")
+        print("\n[IOU 행렬]")
+        print(iou_matrix)
+        print("\n[마할라노비스 거리 행렬]")
+        print(mh_matrix)
+        
+        print("\n[최종 매칭 결과]")
+        for m in matched:
+            det_idx, trk_idx = m
+            trk_id = all_trackers[trk_idx].id
+            print(f"검출 {det_idx} -> 트래커 ID {trk_id} (임베딩: {emb_cost[det_idx, trk_idx]:.4f}, "
+                  f"IOU: {iou_matrix[det_idx, trk_idx]:.4f}, "
+                  f"마할라노비스: {mh_matrix[det_idx, trk_idx]:.4f})")
+        
         print(f"\n{'='*50}")
         
-        trust = (dets[:, 4] - self.det_thresh) / (1 - self.det_thresh)
-        af = 0.95
-        dets_alpha = af + (1 - af) * (1 - trust)
-
+        # Update matched trackers with assigned detections
         for m in matched:
-            self.trackers[m[1]].update(dets[m[0], :], scores[m[0]])
-            self.trackers[m[1]].update_emb(dets_embs[m[0]], alpha=dets_alpha[m[0]])
-
+            det_idx, trk_idx = m
+            all_trackers[trk_idx].update(dets[det_idx])
+            if dets_embs is not None:
+                all_trackers[trk_idx].update_emb(dets_embs[det_idx])
+        
+        # Create new trackers for unmatched detections
         for i in unmatched_dets:
-            if dets[i, 4] >= self.det_thresh:
-                self.trackers.append(KalmanBoxTracker(dets[i, :], emb=dets_embs[i]))
-
-        # 전체 트래커 ID 목록 (잠재적인 것 포함)
-        all_trackers = [trk.id + 1 for trk in self.trackers]
-        print(f"전체 트래커 ID (잠재적인 것 포함): {all_trackers}")
-
-        ret = []
+            trk = KalmanBoxTracker(dets[i])
+            if dets_embs is not None:
+                trk.update_emb(dets_embs[i])
+            self.trackers.append(trk)
+        
+        # Update tracker states and remove dead trackers
         i = len(self.trackers)
         for trk in reversed(self.trackers):
-            d = trk.get_state()[0]
-            # 매칭되지 않은 트래커도 일정 기간 동안은 결과에 포함
-            if (trk.time_since_update < 5) and (trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits):
-                # +1 as MOT benchmark requires positive
-                ret.append(np.concatenate((d, [trk.id + 1], [trk.get_confidence()])).reshape(1, -1))
-            i -= 1
-            # remove dead tracklet
             if trk.time_since_update > self.max_age:
-                self.trackers.pop(i)
-
-        # 시각화되는 트래커 ID 목록
-        active_trackers = [int(r[0][4]) for r in ret] if len(ret) > 0 else []
-        print(f"시각화되는 트래커 ID: {active_trackers}")
-
+                self.trackers.pop(i-1)
+            i -= 1
+        
+        # Generate output
+        ret = []
+        for trk in self.trackers:
+            if trk.time_since_update < 1:
+                d = trk.get_state()[0]
+                conf = trk.get_confidence()
+                ret.append(np.concatenate((d, [trk.id, conf])).reshape(1, -1))
+        
+        print(f"전체 트래커 ID (잠재적인 것 포함): {[t.id for t in self.trackers]}")
+        print(f"시각화되는 트래커 ID: {[int(r[0, -2]) for r in ret if len(r) > 0]}")
+        
         if len(ret) > 0:
             return np.concatenate(ret)
-        return np.empty((0, 5))
+        return np.empty((0, 6))  # x1, y1, x2, y2, id, confidence
 
     def dump_cache(self):
         if self.ecc is not None:
@@ -329,27 +356,27 @@ class BoostTrack(object):
 
         return iou_batch(detections, trackers) if not buffered else soft_biou_batch(detections, trackers)
 
-    def get_mh_dist_matrix(self, detections: np.ndarray, n_dims: int = 4) -> np.ndarray:
-        if len(self.trackers) == 0:
+    def get_mh_dist_matrix(self, detections: np.ndarray, trackers: List[KalmanBoxTracker]) -> np.ndarray:
+        if len(trackers) == 0:
             return np.zeros((0, 0))
-        z = np.zeros((len(detections), n_dims), dtype=float)
-        x = np.zeros((len(self.trackers), n_dims), dtype=float)
+        z = np.zeros((len(detections), 4), dtype=float)
+        x = np.zeros((len(trackers), 4), dtype=float)
         sigma_inv = np.zeros_like(x, dtype=float)
 
-        f = self.trackers[0].bbox_to_z_func
+        f = trackers[0].bbox_to_z_func
         for i in range(len(detections)):
-            z[i, :n_dims] = f(detections[i, :]).reshape((-1, ))[:n_dims]
-        for i in range(len(self.trackers)):
-            x[i] = self.trackers[i].kf.x[:n_dims]
+            z[i, :] = f(detections[i, :]).reshape((-1, ))[:4]
+        for i in range(len(trackers)):
+            x[i] = trackers[i].kf.x[:4]
             # Note: we assume diagonal covariance matrix
-            sigma_inv[i] = np.reciprocal(np.diag(self.trackers[i].kf.covariance[:n_dims, :n_dims]))
+            sigma_inv[i] = np.reciprocal(np.diag(trackers[i].kf.covariance[:4, :4]))
 
-        return ((z.reshape((-1, 1, n_dims)) - x.reshape((1, -1, n_dims))) ** 2 * sigma_inv.reshape((1, -1, n_dims))).sum(axis=2)
+        return ((z.reshape((-1, 1, 4)) - x.reshape((1, -1, 4))) ** 2 * sigma_inv.reshape((1, -1, 4))).sum(axis=2)
 
     def duo_confidence_boost(self, detections: np.ndarray) -> np.ndarray:
         n_dims = 4
         limit = 13.2767
-        mahalanobis_distance = self.get_mh_dist_matrix(detections, n_dims)
+        mahalanobis_distance = self.get_mh_dist_matrix(detections, self.trackers)
 
         if mahalanobis_distance.size > 0 and self.frame_count > 1:
             min_mh_dists = mahalanobis_distance.min(1)
@@ -390,7 +417,7 @@ class BoostTrack(object):
             trk[:] = [pos[0], pos[1], pos[2], pos[3], 0, self.trackers[t].time_since_update - 1]
 
         if use_rich_sim:
-            mhd_sim = MhDist_similarity(self.get_mh_dist_matrix(detections), 1)
+            mhd_sim = MhDist_similarity(self.get_mh_dist_matrix(detections, self.trackers), 1)
             shape_sim = shape_similarity(detections, trackers)
             S = (mhd_sim + shape_sim + sbiou_matrix) / 3
         else:

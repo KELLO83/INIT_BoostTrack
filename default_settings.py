@@ -10,7 +10,7 @@ def get_detector_path_and_im_size(args) -> Tuple[str, Tuple[int, int]]:
 
 class GeneralSettings:
     values: Dict[str, Union[float, bool, int, str]] = {
-        'max_age': 30,
+        'max_age': 50,
         'min_hits': 3,
         'det_thresh': 0.5,
         'iou_threshold': 0.3,
@@ -48,10 +48,7 @@ class GeneralSettings:
 
     @staticmethod
     def max_age(seq_name: str) -> int:
-        try:
-            return max(int(GeneralSettings.video_to_frame_rate[seq_name] * 2), 30)
-        except:
-            return 30
+        return GeneralSettings.values['max_age']
 
     @staticmethod
     def __class_getitem__(key: str):
